@@ -1,0 +1,39 @@
+name: Gold Price Bot
+
+on:
+  schedule:
+    # 01:00 UTC = 08:00 giờ Việt Nam (UTC+7), chạy mỗi ngày
+    - cron: "0 1 * * *"
+  workflow_dispatch: {}  # cho phép bấm chạy tay từ tab Actions để test
+
+permissions:
+  contents: write  # cần quyền ghi để commit lại history.json
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cài thư viện
+        run: pip install -r requirements.txt
+
+      - name: Chạy bot gửi giá vàng
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python main.py
+
+      - name: Lưu lại lịch sử giá (commit history.json)
+        run: |
+          git config user.name "gold-price-bot"
+          git config user.email "actions@github.com"
+          git add history.json
+          git diff --cached --quiet || git commit -m "Cập nhật lịch sử giá vàng $(date +'%Y-%m-%d')"
+          git push
