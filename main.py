@@ -2,33 +2,43 @@
 # -*- coding: utf-8 -*-
 """
 Bot theo dõi giá vàng (trong nước + thế giới) và gửi báo cáo qua Telegram.
-Được thiết kế để chạy định kỳ bằng GitHub Actions (xem .github/workflows/gold-price.yml).
+Chạy định kỳ bằng GitHub Actions (xem .github/workflows/gold-price.yml).
 
-Nguồn dữ liệu:
-- Vàng SJC & các thương hiệu khác (BTMC tổng hợp nhiều loại): thư viện vnstock
-  (https://github.com/thinh-vu/vnstock) - đây là thư viện mã nguồn mở được bảo trì
-  tích cực, lấy dữ liệu chính thức từ SJC.
-- Vàng DOJI: API công khai (không chính thức) của giavang.doji.vn
-- Vàng PNJ: cào dữ liệu (scrape) từ trang giavang.pnj.com.vn (best-effort)
-- Giá vàng thế giới (XAU/USD): API công khai miễn phí của goldprice.org
-- Tỷ giá USD/VND: API công khai miễn phí open.er-api.com
+PHIÊN BẢN 2 — LỊCH SỬ THAY ĐỔI:
+Bản đầu dùng sjc.com.vn (qua thư viện vnstock), goldprice.org và api.btmc.vn
+làm nguồn dữ liệu. Khi chạy thật trên GitHub Actions, cả 3 nguồn này đều lỗi:
+- sjc.com.vn & goldprice.org: trả về 403 Forbidden — các trang này chặn theo
+  dải IP của các nhà cung cấp cloud (Azure/AWS/GCP), mà GitHub Actions runner
+  chạy trên Azure nên bị chặn, KHÔNG liên quan tới code.
+- api.btmc.vn: connection timeout — máy chủ không phản hồi được từ ngoài VN.
+Bản 2 này chuyển sang các nguồn thân thiện với việc lấy dữ liệu tự động hơn:
+- Giá thế giới (XAU/USD): Stooq.com — nguồn dữ liệu tài chính phổ biến, hầu
+  như không chặn theo IP.
+- Giá trong nước (SJC/DOJI/PNJ): giavang.org — trang tổng hợp có định dạng
+  văn bản ổn định, dễ phân tích, gom đủ cả 3 thương hiệu bạn cần so sánh.
+- Thêm cơ chế "proxy dự phòng" (allorigins.win): nếu gọi trực tiếp vẫn bị
+  chặn/lỗi, script tự động thử lại qua proxy trung gian trước khi bỏ cuộc.
 
 LƯU Ý QUAN TRỌNG:
-- DOJI và PNJ không có API chính thức công khai, script phải "cào" dữ liệu (scrape)
-  từ các endpoint không chính thức. Các endpoint này CÓ THỂ thay đổi hoặc ngừng hoạt
-  động bất cứ lúc nào mà không báo trước, khiến nguồn đó tạm thời không lấy được dữ
-  liệu. Vì vậy mọi hàm lấy dữ liệu đều được bọc trong try/except: nếu 1 nguồn lỗi,
-  bot vẫn gửi báo cáo với các nguồn còn lại thay vì bị crash hoàn toàn.
-- Đây KHÔNG phải là lời khuyên đầu tư. Các "tín hiệu xu hướng" trong báo cáo chỉ mang
-  tính tham khảo dựa trên dữ liệu lịch sử đơn giản, không phải khuyến nghị tài chính.
+- Đây đều là nguồn không chính thức (không phải API do SJC/DOJI/PNJ công bố),
+  nên CÓ THỂ thay đổi cấu trúc hoặc ngừng hoạt động bất cứ lúc nào. Mọi hàm
+  lấy dữ liệu đều được bọc try/except: nếu 1 nguồn lỗi, bot vẫn gửi báo cáo
+  với các nguồn còn lại thay vì crash hoàn toàn.
+- Đây KHÔNG phải là lời khuyên đầu tư. "Tín hiệu xu hướng" trong báo cáo chỉ
+  mang tính tham khảo dựa trên dữ liệu lịch sử đơn giản.
 """
 
+import csv
+import io
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone, timedelta
+from urllib.parse import quote
 
 import requests
+from bs4 import BeautifulSoup
 
 # ============================================================
 # CẤU HÌNH
@@ -46,10 +56,44 @@ HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    )
+    ),
+    "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
-REQUEST_TIMEOUT = 10  # giây
+REQUEST_TIMEOUT = 15  # giây
+
+# Trang giá vàng tổng hợp — có sẵn cả SJC, DOJI, PNJ với định dạng ổn định
+DOMESTIC_SOURCES = {
+    "SJC": "https://giavang.org/trong-nuoc/sjc/",
+    "DOJI": "https://giavang.org/trong-nuoc/doji/",
+    "PNJ": "https://giavang.org/trong-nuoc/pnj/",
+}
+
+
+# ============================================================
+# HTTP HELPER — có cơ chế proxy dự phòng khi bị chặn/lỗi
+# ============================================================
+
+def smart_get(url, timeout=REQUEST_TIMEOUT, use_proxy_fallback=True):
+    """Gọi GET tới url. Nếu lỗi (bị chặn 403, timeout...) và use_proxy_fallback=True,
+    thử lại 1 lần qua proxy trung gian (allorigins.win) trước khi báo lỗi."""
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=timeout)
+        if r.status_code == 200:
+            return r
+        raise requests.exceptions.HTTPError(f"HTTP {r.status_code} cho {url}")
+    except Exception as direct_err:
+        if not use_proxy_fallback:
+            raise
+        try:
+            proxy_url = "https://api.allorigins.win/raw?url=" + quote(url, safe="")
+            r2 = requests.get(proxy_url, headers=HEADERS, timeout=timeout + 10)
+            r2.raise_for_status()
+            return r2
+        except Exception as proxy_err:
+            raise RuntimeError(
+                f"gọi trực tiếp lỗi ({direct_err}); gọi qua proxy cũng lỗi ({proxy_err})"
+            )
 
 
 # ============================================================
@@ -57,13 +101,22 @@ REQUEST_TIMEOUT = 10  # giây
 # ============================================================
 
 def fetch_world_gold():
-    """Lấy giá vàng thế giới (USD/oz) từ goldprice.org (API công khai, không cần key)."""
+    """Lấy giá vàng thế giới (USD/oz). Ưu tiên Stooq (ít bị chặn IP cloud),
+    dự phòng bằng goldprice.org nếu Stooq lỗi."""
+    # --- Nguồn chính: Stooq ---
     try:
-        r = requests.get(
-            "https://data-asg.goldprice.org/dbXRates/USD",
-            headers=HEADERS, timeout=REQUEST_TIMEOUT,
-        )
-        r.raise_for_status()
+        r = smart_get("https://stooq.com/q/l/?s=xauusd&f=sd2t2ohlc&h&e=csv")
+        reader = csv.DictReader(io.StringIO(r.text))
+        row = next(reader)
+        close = float(row["Close"])
+        if close > 0:
+            return {"usd_oz": close, "change_pct": None}
+    except Exception as e:
+        print(f"[LỖI] fetch_world_gold (Stooq): {e}", file=sys.stderr)
+
+    # --- Dự phòng: goldprice.org ---
+    try:
+        r = smart_get("https://data-asg.goldprice.org/dbXRates/USD")
         data = r.json()
         item = data["items"][0]
         return {
@@ -71,18 +124,14 @@ def fetch_world_gold():
             "change_pct": float(item.get("pcXau", 0)),
         }
     except Exception as e:
-        print(f"[LỖI] fetch_world_gold: {e}", file=sys.stderr)
+        print(f"[LỖI] fetch_world_gold (goldprice.org): {e}", file=sys.stderr)
         return None
 
 
 def fetch_usd_vnd_rate():
     """Lấy tỷ giá USD/VND từ open.er-api.com (API công khai, không cần key)."""
     try:
-        r = requests.get(
-            "https://open.er-api.com/v6/latest/USD",
-            headers=HEADERS, timeout=REQUEST_TIMEOUT,
-        )
-        r.raise_for_status()
+        r = smart_get("https://open.er-api.com/v6/latest/USD")
         data = r.json()
         return float(data["rates"]["VND"])
     except Exception as e:
@@ -90,94 +139,33 @@ def fetch_usd_vnd_rate():
         return None
 
 
-def fetch_sjc():
-    """Lấy giá vàng SJC qua thư viện vnstock."""
+_PRICE_PATTERN = re.compile(
+    r"Mua\s*vào\s*([\d.,]+)\s*x1000đ/lượng.*?Bán\s*ra\s*([\d.,]+)\s*x1000đ/lượng",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def fetch_domestic_brand(brand_name, url):
+    """Lấy giá mua/bán của 1 thương hiệu vàng (SJC/DOJI/PNJ) từ trang tổng hợp
+    giavang.org. Trang này hiển thị giá theo dạng: 'Mua vào 137.400 x1000đ/lượng
+    ... Bán ra 141.400 x1000đ/lượng' ngay đầu trang — ta dùng regex để lấy ra."""
     try:
-        from vnstock.explorer.misc.gold_price import sjc_gold_price
-        df = sjc_gold_price()
-        if df is None or len(df) == 0:
-            return None
-        row = df.iloc[0]
-        return {
-            "buy": float(row.get("buy_price", 0)),
-            "sell": float(row.get("sell_price", 0)),
-            "name": str(row.get("name", "Vàng SJC")),
-        }
-    except Exception as e:
-        print(f"[LỖI] fetch_sjc: {e}", file=sys.stderr)
-        return None
-
-
-def fetch_btmc():
-    """Lấy bảng giá vàng Bảo Tín Minh Châu (nhiều loại vàng) qua vnstock."""
-    try:
-        from vnstock.explorer.misc.gold_price import btmc_goldprice
-        df = btmc_goldprice()
-        if df is None or len(df) == 0:
-            return None
-        results = []
-        for _, row in df.iterrows():
-            results.append({
-                "name": str(row.get("name", "")),
-                "buy": float(row.get("buy_price", 0)),
-                "sell": float(row.get("sell_price", 0)),
-            })
-        return results
-    except Exception as e:
-        print(f"[LỖI] fetch_btmc: {e}", file=sys.stderr)
-        return None
-
-
-def fetch_doji():
-    """Lấy giá vàng DOJI qua API công khai (không chính thức) của giavang.doji.vn.
-    Best-effort: nguồn này có thể đổi cấu trúc hoặc chặn request bất kỳ lúc nào."""
-    try:
-        r = requests.get(
-            "http://giavang.doji.vn/api/giavang/?api_key=258fbd2a72ce8481089d88c678e9fe4f",
-            headers=HEADERS, timeout=REQUEST_TIMEOUT,
-        )
-        r.raise_for_status()
-        data = r.json()
-        rows = data.get("Data", {}).get("Group", [])
-        # Tìm dòng vàng SJC/nhẫn tại khu vực Hà Nội hoặc HCM trong bảng DOJI
-        for group in rows:
-            items = group.get("Item", [])
-            for item in items:
-                name = item.get("Name", "")
-                if "SJC" in name.upper() or "NHẪN" in name.upper() or "9999" in name:
-                    buy = item.get("Buy") or item.get("BuyValue")
-                    sell = item.get("Sell") or item.get("SellValue")
-                    if buy and sell:
-                        return {
-                            "name": name,
-                            "buy": float(str(buy).replace(",", "")) * 1000,
-                            "sell": float(str(sell).replace(",", "")) * 1000,
-                        }
-        return None
-    except Exception as e:
-        print(f"[LỖI] fetch_doji (nguồn có thể đang thay đổi cấu trúc): {e}", file=sys.stderr)
-        return None
-
-
-def fetch_pnj():
-    """Lấy giá vàng PNJ bằng cách cào (scrape) trang giavang.pnj.com.vn.
-    Best-effort: PNJ không có API JSON công khai ổn định, nên hàm này dễ lỗi nhất
-    trong số các nguồn. Nếu lỗi, bot sẽ bỏ qua nguồn này trong báo cáo."""
-    try:
-        from bs4 import BeautifulSoup
-        r = requests.get(
-            "https://giavang.pnj.com.vn/",
-            headers=HEADERS, timeout=REQUEST_TIMEOUT,
-        )
-        r.raise_for_status()
+        r = smart_get(url)
         soup = BeautifulSoup(r.text, "lxml")
         text = soup.get_text(" ", strip=True)
-        # Việc cào HTML thô rất dễ vỡ khi PNJ đổi giao diện, nên ở đây ta không
-        # cố gắng phân tích chi tiết mà để ngỏ - khuyến khích thay bằng API ổn định
-        # hơn nếu tìm được trong tương lai.
-        return None  # Hiện tại chưa có cách bóc tách tin cậy, xem ghi chú trong README
+        match = _PRICE_PATTERN.search(text)
+        if not match:
+            print(f"[LỖI] fetch_domestic_brand({brand_name}): không tìm thấy mẫu giá trong trang",
+                  file=sys.stderr)
+            return None
+        buy_raw, sell_raw = match.group(1), match.group(2)
+        buy = float(buy_raw.replace(".", "").replace(",", "")) * 1000
+        sell = float(sell_raw.replace(".", "").replace(",", "")) * 1000
+        if buy <= 0 or sell <= 0:
+            return None
+        return {"name": brand_name, "buy": buy, "sell": sell}
     except Exception as e:
-        print(f"[LỖI] fetch_pnj: {e}", file=sys.stderr)
+        print(f"[LỖI] fetch_domestic_brand({brand_name}): {e}", file=sys.stderr)
         return None
 
 
@@ -202,7 +190,6 @@ def save_history(history):
 
 
 def trend_arrow(change):
-    """Trả về icon xu hướng dựa trên % thay đổi."""
     if change is None:
         return "➖"
     if change > 0.05:
@@ -270,69 +257,51 @@ def fmt_vnd(x):
     return f"{x:,.0f}".replace(",", ".")
 
 
-def build_message(now_str, world, usd_vnd, sjc, btmc, doji, trend):
+def build_message(now_str, world, usd_vnd, domestic, trend):
     lines = []
     lines.append(f"🥇 <b>BÁO CÁO GIÁ VÀNG</b> — {now_str}")
     lines.append("")
 
     # --- Giá trong nước ---
     lines.append("💰 <b>Giá vàng trong nước</b>")
-    if sjc:
-        lines.append(
-            f"• SJC: mua {fmt_vnd(sjc['buy'])} — bán {fmt_vnd(sjc['sell'])} đ/lượng"
-        )
-    else:
-        lines.append("• SJC: ⚠️ không lấy được dữ liệu lúc này")
-
-    if doji:
-        lines.append(
-            f"• DOJI: mua {fmt_vnd(doji['buy'])} — bán {fmt_vnd(doji['sell'])} đ/lượng"
-        )
-    else:
-        lines.append("• DOJI: ⚠️ không lấy được dữ liệu lúc này")
-
-    if btmc:
-        # chỉ hiện 1-2 dòng tiêu biểu (vàng miếng SJC & nhẫn tròn) để tin nhắn gọn
-        shown = 0
-        for item in btmc:
-            if shown >= 2:
-                break
-            if item["buy"] and item["sell"]:
-                lines.append(
-                    f"• {item['name']}: mua {fmt_vnd(item['buy'])} — "
-                    f"bán {fmt_vnd(item['sell'])} đ/lượng"
-                )
-                shown += 1
+    for brand in ("SJC", "DOJI", "PNJ"):
+        d = domestic.get(brand)
+        if d:
+            lines.append(f"• {brand}: mua {fmt_vnd(d['buy'])} — bán {fmt_vnd(d['sell'])} đ/lượng")
+        else:
+            lines.append(f"• {brand}: ⚠️ không lấy được dữ liệu lúc này")
 
     lines.append("")
 
     # --- Giá thế giới ---
     lines.append("🌍 <b>Giá vàng thế giới</b>")
     if world:
-        arrow = trend_arrow(world["change_pct"])
-        lines.append(
-            f"• XAU/USD: {world['usd_oz']:,.2f} USD/oz "
-            f"({arrow} {world['change_pct']:+.2f}% so với hôm qua)"
-        )
+        if world["change_pct"] is not None:
+            arrow = trend_arrow(world["change_pct"])
+            lines.append(
+                f"• XAU/USD: {world['usd_oz']:,.2f} USD/oz "
+                f"({arrow} {world['change_pct']:+.2f}% so với hôm qua)"
+            )
+        else:
+            lines.append(f"• XAU/USD: {world['usd_oz']:,.2f} USD/oz")
+
         if usd_vnd:
-            # quy đổi tương đối: 1 lượng = 1.20556 oz troy
-            oz_per_luong = 1.20556
+            oz_per_luong = 1.20556  # 1 lượng = 1.20556 troy oz
             world_vnd_luong = world["usd_oz"] * oz_per_luong * usd_vnd
             lines.append(f"• Quy đổi ≈ {fmt_vnd(world_vnd_luong)} đ/lượng (chưa thuế/phí)")
             lines.append(f"• Tỷ giá USD/VND: {usd_vnd:,.0f}")
 
+            sjc = domestic.get("SJC")
             if sjc:
                 premium = sjc["sell"] - world_vnd_luong
-                lines.append(
-                    f"📊 Chênh lệch SJC vs thế giới: {fmt_vnd(premium)} đ/lượng"
-                )
+                lines.append(f"📊 Chênh lệch SJC vs thế giới: {fmt_vnd(premium)} đ/lượng")
     else:
         lines.append("• ⚠️ không lấy được dữ liệu lúc này")
 
     lines.append("")
 
     # --- Xu hướng ---
-    lines.append("📊 <b>Phân tích xu hướng (tham khảo)</b>")
+    lines.append("📊 <b>Phân tích xu hướng (tham khảo, dựa trên giá SJC)</b>")
     if trend:
         if trend["d1_pct"] is not None:
             lines.append(f"• So với hôm qua: {trend_arrow(trend['d1_pct'])} {trend['d1_pct']:+.2f}%")
@@ -385,22 +354,23 @@ def main():
 
     world = fetch_world_gold()
     usd_vnd = fetch_usd_vnd_rate()
-    sjc = fetch_sjc()
-    btmc = fetch_btmc()
-    doji = fetch_doji()
-    # pnj = fetch_pnj()  # tạm thời chưa ổn định, xem README
+
+    domestic = {}
+    for brand, url in DOMESTIC_SOURCES.items():
+        domestic[brand] = fetch_domestic_brand(brand, url)
 
     history = load_history()
-    trend = analyze_trend(history, sjc["sell"] if sjc else None)
+    sjc_sell_today = domestic["SJC"]["sell"] if domestic.get("SJC") else None
+    trend = analyze_trend(history, sjc_sell_today)
 
-    message = build_message(now_str, world, usd_vnd, sjc, btmc, doji, trend)
+    message = build_message(now_str, world, usd_vnd, domestic, trend)
     send_telegram(message)
 
     # Lưu lại dữ liệu hôm nay vào lịch sử để tính xu hướng cho các lần sau
     today_record = {
         "date": now_vn.strftime("%Y-%m-%d"),
-        "sjc_buy": sjc["buy"] if sjc else None,
-        "sjc_sell": sjc["sell"] if sjc else None,
+        "sjc_buy": domestic["SJC"]["buy"] if domestic.get("SJC") else None,
+        "sjc_sell": sjc_sell_today,
         "world_usd_oz": world["usd_oz"] if world else None,
         "usd_vnd": usd_vnd,
     }
