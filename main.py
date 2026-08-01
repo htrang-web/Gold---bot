@@ -107,12 +107,20 @@ def fetch_world_gold():
     # endpoint "quote" q/l/ vốn hay đổi/trả 404) ---
     try:
         r = smart_get("https://stooq.com/q/d/l/?s=xauusd&i=d")
-        rows = list(csv.DictReader(io.StringIO(r.text.strip())))
-        if rows:
-            last = rows[-1]  # dòng cuối = phiên gần nhất
-            close = float(last["Close"])
-            if close > 0:
-                return {"usd_oz": close, "change_pct": None}
+        # Đọc theo vị trí cột (không theo tên) vì Stooq có thể trả về tên cột
+        # khác nhau tùy ngôn ngữ/phiên bản. Định dạng chuẩn OHLCV là:
+        # Date, Open, High, Low, Close, Volume  (cột Close ở vị trí index 4)
+        all_rows = list(csv.reader(io.StringIO(r.text.strip())))
+        data_rows = all_rows[1:]  # bỏ dòng tiêu đề
+        # Lấy từ dòng cuối lên, bỏ qua các dòng thiếu dữ liệu (vd cuối tuần)
+        for row in reversed(data_rows):
+            if len(row) >= 5:
+                try:
+                    close = float(row[4])
+                    if close > 0:
+                        return {"usd_oz": close, "change_pct": None}
+                except ValueError:
+                    continue
     except Exception as e:
         print(f"[LỖI] fetch_world_gold (Stooq): {e}", file=sys.stderr)
 
