@@ -103,14 +103,16 @@ def smart_get(url, timeout=REQUEST_TIMEOUT, use_proxy_fallback=True):
 def fetch_world_gold():
     """Lấy giá vàng thế giới (USD/oz). Ưu tiên Stooq (ít bị chặn IP cloud),
     dự phòng bằng goldprice.org nếu Stooq lỗi."""
-    # --- Nguồn chính: Stooq ---
+    # --- Nguồn chính: Stooq (dùng endpoint tải dữ liệu lịch sử, ổn định hơn
+    # endpoint "quote" q/l/ vốn hay đổi/trả 404) ---
     try:
-        r = smart_get("https://stooq.com/q/l/?s=xauusd&f=sd2t2ohlc&h&e=csv")
-        reader = csv.DictReader(io.StringIO(r.text))
-        row = next(reader)
-        close = float(row["Close"])
-        if close > 0:
-            return {"usd_oz": close, "change_pct": None}
+        r = smart_get("https://stooq.com/q/d/l/?s=xauusd&i=d")
+        rows = list(csv.DictReader(io.StringIO(r.text.strip())))
+        if rows:
+            last = rows[-1]  # dòng cuối = phiên gần nhất
+            close = float(last["Close"])
+            if close > 0:
+                return {"usd_oz": close, "change_pct": None}
     except Exception as e:
         print(f"[LỖI] fetch_world_gold (Stooq): {e}", file=sys.stderr)
 
