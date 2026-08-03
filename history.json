@@ -19,5 +19,12 @@
     "sjc_sell": 141000000.0,
     "world_usd_oz": null,
     "usd_vnd": 26190.990156
+  },
+  {
+    "date": "2026-08-03",
+    "sjc_buy": 137500000.0,
+    "sjc_sell": 141000000.0,
+    "world_usd_oz": null,
+    "usd_vnd": 26179.97891
   }
 ]
