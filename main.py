@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """
 Bot theo dõi giá vàng (trong nước + thế giới) và gửi báo cáo qua Telegram.
-
 """
 
 import csv
@@ -74,45 +73,86 @@ def smart_get(url, timeout=REQUEST_TIMEOUT, use_proxy_fallback=True):
 
 
 # ============================================================
-# CÁC HÀM LẤY DỮ LIỆU
+# CÁC HÀM LẤY DỮ LIỆU (ĐÃ SỬA)
 # ============================================================
 
 def fetch_world_gold():
-    """Lấy giá vàng thế giới (USD/oz). Ưu tiên Stooq (ít bị chặn IP cloud),
-    dự phòng bằng goldprice.org nếu Stooq lỗi."""
-    # --- Nguồn chính: Stooq (dùng endpoint tải dữ liệu lịch sử, ổn định hơn
-    # endpoint "quote" q/l/ vốn hay đổi/trả 404) ---
+    """
+    Lấy giá vàng thế giới (USD/oz).
+    Nguồn chính: goldprice.dev (free, không cần key, JSON).
+    Nguồn dự phòng 1: GoldAPI.io (nếu user đã đăng ký free tier và có key).
+    Nguồn dự phòng 2: Stooq (có thể không còn hoạt động do chặn bot).
+    """
+    # --- Nguồn chính: goldprice.dev ---
+    try:
+        # 1. Lấy giá spot hiện tại
+        r = smart_get("https://api.goldprice.dev/v1/spot/XAU-USD-SPOT")
+        data = r.json()
+        price = float(data["price"])
+
+        # 2. Lấy 2 ngày gần nhất để tính % thay đổi so với hôm qua
+        today = datetime.now(VN_TZ).strftime("%Y-%m-%d")
+        yesterday = (datetime.now(VN_TZ) - timedelta(days=1)).strftime("%Y-%m-%d")
+        hist_url = (
+            "https://api.goldprice.dev/v1/bars"
+            f"?symbol=XAU-USD-SPOT&interval=1d&from={yesterday}&to={today}"
+        )
+        r2 = smart_get(hist_url)
+        hist = r2.json()
+        bars = hist.get("bars", [])
+
+        change_pct = None
+        if len(bars) >= 2:
+            # bars được sắp xếp mới nhất đầu tiên
+            today_close = float(bars[0]["close"])
+            prev_close = float(bars[1]["close"])
+            if prev_close > 0:
+                change_pct = (today_close - prev_close) / prev_close * 100
+
+        return {"usd_oz": price, "change_pct": change_pct, "source": "goldprice.dev"}
+    except Exception as e:
+        print(f"[LỖI] fetch_world_gold (goldprice.dev): {e}", file=sys.stderr)
+
+    # --- Dự phòng 1: GoldAPI.io (cần key, free tier ~100 req/tháng) ---
+    goldapi_key = os.environ.get("GOLDAPI_KEY", "")
+    if goldapi_key:
+        try:
+            api_headers = {
+                "x-access-token": goldapi_key,
+                "User-Agent": HEADERS["User-Agent"],
+            }
+            r = requests.get(
+                "https://www.goldapi.io/api/XAU/USD",
+                headers=api_headers,
+                timeout=REQUEST_TIMEOUT,
+            )
+            r.raise_for_status()
+            data = r.json()
+            return {
+                "usd_oz": float(data["price"]),
+                "change_pct": float(data.get("ch", 0)),
+                "source": "goldapi.io",
+            }
+        except Exception as e:
+            print(f"[LỖI] fetch_world_gold (goldapi.io): {e}", file=sys.stderr)
+
+    # --- Dự phòng 2: Stooq (có thể không còn hoạt động) ---
     try:
         r = smart_get("https://stooq.com/q/d/l/?s=xauusd&i=d")
-        # Đọc theo vị trí cột (không theo tên) vì Stooq có thể trả về tên cột
-        # khác nhau tùy ngôn ngữ/phiên bản. Định dạng chuẩn OHLCV là:
-        # Date, Open, High, Low, Close, Volume  (cột Close ở vị trí index 4)
         all_rows = list(csv.reader(io.StringIO(r.text.strip())))
-        data_rows = all_rows[1:]  # bỏ dòng tiêu đề
-        # Lấy từ dòng cuối lên, bỏ qua các dòng thiếu dữ liệu (vd cuối tuần)
+        data_rows = all_rows[1:]
         for row in reversed(data_rows):
             if len(row) >= 5:
                 try:
                     close = float(row[4])
                     if close > 0:
-                        return {"usd_oz": close, "change_pct": None}
+                        return {"usd_oz": close, "change_pct": None, "source": "stooq"}
                 except ValueError:
                     continue
     except Exception as e:
         print(f"[LỖI] fetch_world_gold (Stooq): {e}", file=sys.stderr)
 
-    # --- Dự phòng: goldprice.org ---
-    try:
-        r = smart_get("https://data-asg.goldprice.org/dbXRates/USD")
-        data = r.json()
-        item = data["items"][0]
-        return {
-            "usd_oz": float(item["xauPrice"]),
-            "change_pct": float(item.get("pcXau", 0)),
-        }
-    except Exception as e:
-        print(f"[LỖI] fetch_world_gold (goldprice.org): {e}", file=sys.stderr)
-        return None
+    return None
 
 
 def fetch_usd_vnd_rate():
