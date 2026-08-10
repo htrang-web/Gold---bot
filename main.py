@@ -2,30 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Bot theo dõi giá vàng (trong nước + thế giới) và gửi báo cáo qua Telegram.
-Chạy định kỳ bằng GitHub Actions (xem .github/workflows/gold-price.yml).
 
-PHIÊN BẢN 2 — LỊCH SỬ THAY ĐỔI:
-Bản đầu dùng sjc.com.vn (qua thư viện vnstock), goldprice.org và api.btmc.vn
-làm nguồn dữ liệu. Khi chạy thật trên GitHub Actions, cả 3 nguồn này đều lỗi:
-- sjc.com.vn & goldprice.org: trả về 403 Forbidden — các trang này chặn theo
-  dải IP của các nhà cung cấp cloud (Azure/AWS/GCP), mà GitHub Actions runner
-  chạy trên Azure nên bị chặn, KHÔNG liên quan tới code.
-- api.btmc.vn: connection timeout — máy chủ không phản hồi được từ ngoài VN.
-Bản 2 này chuyển sang các nguồn thân thiện với việc lấy dữ liệu tự động hơn:
-- Giá thế giới (XAU/USD): Stooq.com — nguồn dữ liệu tài chính phổ biến, hầu
-  như không chặn theo IP.
-- Giá trong nước (SJC/DOJI/PNJ): giavang.org — trang tổng hợp có định dạng
-  văn bản ổn định, dễ phân tích, gom đủ cả 3 thương hiệu bạn cần so sánh.
-- Thêm cơ chế "proxy dự phòng" (allorigins.win): nếu gọi trực tiếp vẫn bị
-  chặn/lỗi, script tự động thử lại qua proxy trung gian trước khi bỏ cuộc.
-
-LƯU Ý QUAN TRỌNG:
-- Đây đều là nguồn không chính thức (không phải API do SJC/DOJI/PNJ công bố),
-  nên CÓ THỂ thay đổi cấu trúc hoặc ngừng hoạt động bất cứ lúc nào. Mọi hàm
-  lấy dữ liệu đều được bọc try/except: nếu 1 nguồn lỗi, bot vẫn gửi báo cáo
-  với các nguồn còn lại thay vì crash hoàn toàn.
-- Đây KHÔNG phải là lời khuyên đầu tư. "Tín hiệu xu hướng" trong báo cáo chỉ
-  mang tính tham khảo dựa trên dữ liệu lịch sử đơn giản.
 """
 
 import csv
