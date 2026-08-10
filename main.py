@@ -4,15 +4,6 @@
 """
 Bot theo dõi giá vàng (trong nước + thế giới) và gửi báo cáo qua Telegram.
 
-Các nguyên tắc chính của phiên bản này:
-1. History được lưu theo NGÀY, không theo số lần bot chạy.
-2. Mỗi ngày chỉ có 1 record. Nếu bot chạy nhiều lần/ngày, record của ngày đó
-   sẽ được cập nhật thay vì append thêm.
-3. D-1 lấy ngày có dữ liệu gần nhất trước ngày hiện tại.
-4. D-7 lấy đúng ngày cách hiện tại 7 ngày; nếu không có dữ liệu thì báo N/A.
-5. SMA3/SMA7 được tính theo các ngày có dữ liệu, bao gồm giá hiện tại.
-6. History chỉ giữ tối đa 90 ngày theo CALENDAR DATE.
-7. Có validation cơ bản để tránh ghi dữ liệu bất thường.
 """
 
 import csv
