@@ -1,10 +1,10 @@
-# 🥇 Gold Price Bot
+# Gold Price Bot
 
 An automated Telegram bot that collects daily gold prices, analyzes short-term price trends, and sends a daily report to Telegram.
 
 The bot was developed to automate the process of monitoring gold prices from multiple sources instead of manually checking different websites every morning.
 
-## 🚀 Key Features
+## Key Features
 
 - Automatically collects daily gold prices from multiple sources.
 - Tracks SJC, BTMC and DOJI gold prices.
@@ -17,7 +17,7 @@ The bot was developed to automate the process of monitoring gold prices from mul
 - Runs automatically every morning using GitHub Actions.
 - Continues running even when one data source is temporarily unavailable.
 
-## 🛠️ Technologies
+## Technologies
 
 - **Python**
 - **GitHub Actions**
@@ -26,7 +26,7 @@ The bot was developed to automate the process of monitoring gold prices from mul
 - **REST APIs / Data Sources**
 - **vnstock**
 
-## 📊 Data Sources
+## Data Sources
 
 | Source | Data | Status |
 |---|---|---|
@@ -39,7 +39,7 @@ The bot was developed to automate the process of monitoring gold prices from mul
 
 > Some data sources, particularly DOJI, rely on unofficial APIs and may become unavailable if the source changes its website or API structure.
 
-## 📈 Trend Analysis
+## Trend Analysis
 
 The bot currently performs several basic analyses based on SJC gold prices:
 
@@ -52,7 +52,7 @@ The bot currently performs several basic analyses based on SJC gold prices:
 
 These metrics are intended to provide a quick overview of recent price movements rather than predict future market movements.
 
-## 🤖 Telegram Report
+## Telegram Report
 
 After collecting and processing the data, the bot automatically sends a daily summary to a configured Telegram chat.
 
@@ -64,7 +64,7 @@ The report includes:
 - Short-term trend
 - Domestic vs. international price difference
 
-## ⚙️ Automation
+## Automation
 
 The bot runs automatically through **GitHub Actions**.
 
