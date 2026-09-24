@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 """
 Bot theo dõi giá vàng (trong nước + thế giới) và gửi báo cáo qua Telegram.
 
@@ -1056,7 +1053,7 @@ def build_message(
             d1_label = "ngày trước đó"
 
             if trend.get("d1_date"):
-                d1_label = trend["d1_date"]
+                d1_label = html.escape(str(trend["d1_date"]))
 
             lines.append(
                 "• So với %s: %s %.2f%%"
@@ -1072,10 +1069,12 @@ def build_message(
             )
 
         if trend.get("d7_pct") is not None:
+            d7_label = html.escape(str(trend["d7_date"]))
+
             lines.append(
                 "• So với 7 ngày trước (%s): %s %.2f%%"
                 % (
-                    trend["d7_date"],
+                    d7_label,
                     trend_arrow(trend["d7_pct"]),
                     trend["d7_pct"]
                 )
@@ -1099,7 +1098,7 @@ def build_message(
 
         lines.append(
             "• Tín hiệu: %s"
-            % trend["signal"]
+            % html.escape(str(trend["signal"]))
         )
 
     else:
